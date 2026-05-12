@@ -259,3 +259,57 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"COUNT=2"* ]]
 }
+
+@test "normalize_paths_for_cleanup removes whole Gradle DSL hash dirs" {
+    run env PROJECT_ROOT="$PROJECT_ROOT" bash --noprofile --norc <<'EOF'
+set -euo pipefail
+
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+    PYTHON_BIN=$(command -v python3 || command -v python || true)
+fi
+[[ -n "$PYTHON_BIN" ]] || { echo "python unavailable"; exit 127; }
+
+"$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+import os
+project_root = Path(os.environ["PROJECT_ROOT"])
+text = (project_root / "bin/clean.sh").read_text()
+start = text.index("normalize_paths_for_cleanup() {")
+depth = 0
+end = None
+for i in range(start, len(text)):
+    ch = text[i]
+    if ch == "{":
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+        if depth == 0:
+            end = i + 1
+            break
+Path("/tmp/normalize_paths_for_cleanup_gradle.sh").write_text(text[start:end] + "\n")
+PY
+
+source /tmp/normalize_paths_for_cleanup_gradle.sh
+
+hash_dir="$HOME/.gradle/caches/8.13/groovy-dsl/abc123"
+paths=(
+    "$hash_dir/metadata.bin"
+    "$hash_dir/classes/cp.bin"
+    "$HOME/.gradle/caches/8.13/kotlin-dsl/def456/metadata.bin"
+)
+
+normalized=()
+while IFS= read -r -d '' line; do
+    normalized+=("$line")
+done < <(normalize_paths_for_cleanup "${paths[@]}")
+
+printf '%s\n' "${normalized[@]}"
+
+[[ ${#normalized[@]} -eq 2 ]]
+[[ "${normalized[0]}" == "$HOME/.gradle/caches/8.13/groovy-dsl/abc123" || "${normalized[1]}" == "$HOME/.gradle/caches/8.13/groovy-dsl/abc123" ]]
+[[ "${normalized[0]}" == "$HOME/.gradle/caches/8.13/kotlin-dsl/def456" || "${normalized[1]}" == "$HOME/.gradle/caches/8.13/kotlin-dsl/def456" ]]
+EOF
+
+    [ "$status" -eq 0 ]
+}
