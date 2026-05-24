@@ -490,3 +490,51 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *"CLEAN:"* ]]
 }
+
+@test "clean_code_editors includes CodeBuddy Extension caches when directory exists" {
+    mkdir -p "$HOME/Library/Application Support/CodeBuddyExtension"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "$2"; }
+clean_code_editors
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CodeBuddy Extension cache"* ]]
+    [[ "$output" == *"CodeBuddy Extension logs"* ]]
+}
+
+@test "clean_code_editors includes CodeBuddy CN caches when directory exists" {
+    mkdir -p "$HOME/Library/Application Support/CodeBuddy CN"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "$2"; }
+clean_code_editors
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CodeBuddy CN cache"* ]]
+    [[ "$output" == *"CodeBuddy CN logs"* ]]
+    [[ "$output" == *"CodeBuddy CN GPU cache"* ]]
+}
+
+@test "clean_code_editors skips CodeBuddy when directories are absent" {
+    rm -rf "$HOME/Library/Application Support/CodeBuddyExtension" "$HOME/Library/Application Support/CodeBuddy CN"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "$2"; }
+clean_code_editors
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"CodeBuddy"* ]]
+}
