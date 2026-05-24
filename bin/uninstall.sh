@@ -547,101 +547,16 @@ uninstall_app_inventory_fingerprint() {
     } | sort -u
 }
 
-# Scan applications and collect information.
-scan_applications() {
-    local temp_file scan_raw_file merged_file refresh_file cache_snapshot_file discovered_file cached_rows_file uncached_rows_file
-    temp_file=$(create_temp_file)
-    scan_raw_file="${temp_file}.scan"
-    merged_file="${temp_file}.merged"
-    refresh_file="${temp_file}.refresh"
-    cache_snapshot_file="${temp_file}.cache"
-    discovered_file="${temp_file}.discovered"
-    cached_rows_file="${temp_file}.cached_rows"
-    uncached_rows_file="${temp_file}.uncached_rows"
-    local scan_status_file="${temp_file}.scan_status"
-    : > "$scan_raw_file"
-    : > "$refresh_file"
-    : > "$cache_snapshot_file"
-    : > "$discovered_file"
-    : > "$cached_rows_file"
-    : > "$uncached_rows_file"
-    : > "$scan_status_file"
+# Internal helpers for scan_applications. They read and write locals
+# declared in the orchestrator's scope via bash dynamic scoping; do not
+# call them outside scan_applications.
 
-    ensure_user_dir "$MOLE_UNINSTALL_META_CACHE_DIR"
-    ensure_user_file "$MOLE_UNINSTALL_META_CACHE_FILE"
-    local cache_source="$MOLE_UNINSTALL_META_CACHE_FILE"
-    local cache_source_is_temp=false
-    if [[ ! -r "$cache_source" ]]; then
-        cache_source=$(create_temp_file)
-        : > "$cache_source"
-        cache_source_is_temp=true
-    fi
-
-    use_cached_scan_metadata() {
-        local cached_app_path="$1"
-        local cached_app_mtime="$2"
-        local cached_bundle_id="$3"
-        local cached_display_name="$4"
-
-        [[ -n "$cached_bundle_id" && -n "$cached_display_name" ]] || return 1
-
-        cached_bundle_id=$(uninstall_resolve_eligible_bundle_id "$cached_app_path" "$cached_bundle_id") || return 1
-
-        printf "%s|%s|%s|%s\n" "$cached_app_path" "$cached_display_name" "$cached_bundle_id" "$cached_app_mtime" >> "$scan_raw_file"
-        return 0
-    }
-
-    # Local spinner_pid for cleanup
-    local spinner_pid=""
-    local spinner_shown_file="${temp_file}.spinner_shown"
-    local previous_int_trap=""
-    previous_int_trap=$(trap -p INT || true)
-
-    restore_scan_int_trap() {
-        if [[ -n "$previous_int_trap" ]]; then
-            # eval: restore previous trap captured by $(trap -p INT)
-            eval "$previous_int_trap"
-        else
-            trap - INT
-        fi
-    }
-
-    # Trap to handle Ctrl+C during scan
-    # shellcheck disable=SC2329  # Function invoked indirectly via trap
-    trap_scan_cleanup() {
-        if [[ -n "$spinner_pid" ]]; then
-            kill -TERM "$spinner_pid" 2> /dev/null || true
-            wait "$spinner_pid" 2> /dev/null || true
-        fi
-        if [[ -f "$spinner_shown_file" ]]; then
-            printf "\r\033[K" >&2
-        fi
-        rm -f "$temp_file" "$scan_raw_file" "$merged_file" "$refresh_file" "$cache_snapshot_file" "$discovered_file" "$cached_rows_file" "$uncached_rows_file" "$scan_status_file" "${temp_file}.sorted" "$spinner_shown_file" 2> /dev/null || true
-        exit 130
-    }
-    trap trap_scan_cleanup INT
-
-    update_scan_status() {
-        local message="$1"
-        local completed="${2:-0}"
-        local total="${3:-0}"
-        printf "%s|%s|%s\n" "$message" "$completed" "$total" > "$scan_status_file"
-    }
-
-    stop_scan_spinner() {
-        if [[ -n "$spinner_pid" ]]; then
-            kill -TERM "$spinner_pid" 2> /dev/null || true
-            wait "$spinner_pid" 2> /dev/null || true
-            spinner_pid=""
-        fi
-        if [[ -f "$spinner_shown_file" ]]; then
-            printf "\r\033[K" >&2
-        fi
-        rm -f "$spinner_shown_file" "$scan_status_file" 2> /dev/null || true
-    }
-
-    # Pass 1: collect app paths and bundle IDs (no mdls).
-    local -a app_data_tuples=()
+# Phase 2 (Pass 1): discover candidate .app paths by combining the
+# configured app search directories with pkg-receipt non-standard install
+# locations, skipping bundles flagged by uninstall_should_skip_app_path.
+# Each row in discovered_file is encoded as <app_path>|<app_name>|<app_mtime>.
+# Writes: discovered_file
+_scan_discover_apps() {
     local -a app_dirs=()
     local app_dir
     while IFS= read -r app_dir; do
@@ -685,6 +600,28 @@ scan_applications() {
             printf "%s|%s|%s\n" "$app_path" "$app_name" "${app_mtime:-0}" >> "$discovered_file"
         done < <(uninstall_print_app_paths_with_mtime "$app_dir")
     done
+}
+
+# Phase 3: partition discovered apps into warm-cache rows (written
+# directly to scan_raw_file) and cold rows (queued in app_data_tuples
+# for parallel metadata resolution in _scan_resolve_uncached).
+# Reads:  cache_source, discovered_file
+# Writes: cached_rows_file, uncached_rows_file, scan_raw_file (via the
+#         nested use_cached_scan_metadata helper), app_data_tuples
+_scan_partition_cache() {
+    use_cached_scan_metadata() {
+        local cached_app_path="$1"
+        local cached_app_mtime="$2"
+        local cached_bundle_id="$3"
+        local cached_display_name="$4"
+
+        [[ -n "$cached_bundle_id" && -n "$cached_display_name" ]] || return 1
+
+        cached_bundle_id=$(uninstall_resolve_eligible_bundle_id "$cached_app_path" "$cached_bundle_id") || return 1
+
+        printf "%s|%s|%s|%s\n" "$cached_app_path" "$cached_display_name" "$cached_bundle_id" "$cached_app_mtime" >> "$scan_raw_file"
+        return 0
+    }
 
     if [[ -s "$discovered_file" ]]; then
         awk -F'|' -v cached_out="$cached_rows_file" -v uncached_out="$uncached_rows_file" '
@@ -716,16 +653,15 @@ scan_applications() {
             app_data_tuples+=("${uncached_app_path}|${uncached_app_name}|${uncached_app_mtime}|${uncached_bundle_id}|${uncached_display_name}")
         done < "$uncached_rows_file"
     fi
+}
 
-    if [[ ${#app_data_tuples[@]} -eq 0 && ! -s "$scan_raw_file" ]]; then
-        rm -f "$temp_file" "$scan_raw_file" "$merged_file" "$refresh_file" "$cache_snapshot_file" "$discovered_file" "$cached_rows_file" "$uncached_rows_file" "$scan_status_file" "${temp_file}.sorted" "$spinner_shown_file" 2> /dev/null || true
-        [[ $cache_source_is_temp == true ]] && rm -f "$cache_source" 2> /dev/null || true
-        restore_scan_int_trap
-        printf "\r\033[K" >&2
-        echo "No applications found to uninstall." >&2
-        return 1
-    fi
-    # Pass 2: resolve display names in parallel.
+# Phase 5 (Pass 2): resolve display names and bundle IDs in parallel for
+# the cold rows queued by _scan_partition_cache. Spawns the progress
+# spinner subprocess (assigns spinner_pid), fans out workers up to
+# max_parallel, and waits for completion.
+# Reads:  app_data_tuples
+# Writes: scan_raw_file (appended by worker subshells)
+_scan_resolve_uncached() {
     local app_count=0
     local total_apps=${#app_data_tuples[@]}
     local max_parallel
@@ -806,18 +742,21 @@ scan_applications() {
             wait "$pid" 2> /dev/null
         done
     fi
+}
 
-    update_scan_status "Building uninstall index..." "0" "0"
-
-    if [[ ! -s "$scan_raw_file" ]]; then
-        stop_scan_spinner
-        echo "No applications found to uninstall" >&2
-        rm -f "$temp_file" "$scan_raw_file" "$merged_file" "$refresh_file" "$cache_snapshot_file" "$discovered_file" "$cached_rows_file" "$uncached_rows_file" "${temp_file}.sorted" "$spinner_shown_file" 2> /dev/null || true
-        [[ $cache_source_is_temp == true ]] && rm -f "$cache_source" 2> /dev/null || true
-        restore_scan_int_trap
-        return 1
-    fi
-
+# Phase 7+8: merge scan_raw_file with the persistent metadata cache,
+# compute display size / last-used / refresh-needed flags (either via the
+# embedded awk pipeline or the bash fallback that performs inline
+# metadata fetches when MOLE_UNINSTALL_INLINE_METADATA_LIMIT > 0), persist
+# the cache snapshot under a lock, sort the result by epoch, kick off the
+# deferred background refresh, and echo the sorted index path for the
+# caller to capture.
+# Reads:  scan_raw_file, cache_source
+# Writes: merged_file, refresh_file, cache_snapshot_file, temp_file,
+#         ${temp_file}.sorted, MOLE_UNINSTALL_META_CACHE_FILE
+# Returns: 0 on success (sorted path is echoed on stdout), 1 if sort
+#          fails or the sorted file did not materialize.
+_scan_finalize_index() {
     update_scan_status "Merging cache data..." "0" "0"
     awk -F'|' '
         NR == FNR {
@@ -1076,6 +1015,122 @@ scan_applications() {
         restore_scan_int_trap
         return 1
     fi
+}
+
+# Scan applications and collect information. Orchestrates the four
+# phases (discover, partition, resolve, finalize) and owns the shared
+# temp files, spinner subprocess, INT trap, and metadata cache lock.
+scan_applications() {
+    local temp_file scan_raw_file merged_file refresh_file cache_snapshot_file discovered_file cached_rows_file uncached_rows_file
+    temp_file=$(create_temp_file)
+    scan_raw_file="${temp_file}.scan"
+    merged_file="${temp_file}.merged"
+    refresh_file="${temp_file}.refresh"
+    cache_snapshot_file="${temp_file}.cache"
+    discovered_file="${temp_file}.discovered"
+    cached_rows_file="${temp_file}.cached_rows"
+    uncached_rows_file="${temp_file}.uncached_rows"
+    local scan_status_file="${temp_file}.scan_status"
+    : > "$scan_raw_file"
+    : > "$refresh_file"
+    : > "$cache_snapshot_file"
+    : > "$discovered_file"
+    : > "$cached_rows_file"
+    : > "$uncached_rows_file"
+    : > "$scan_status_file"
+
+    ensure_user_dir "$MOLE_UNINSTALL_META_CACHE_DIR"
+    ensure_user_file "$MOLE_UNINSTALL_META_CACHE_FILE"
+    local cache_source="$MOLE_UNINSTALL_META_CACHE_FILE"
+    local cache_source_is_temp=false
+    if [[ ! -r "$cache_source" ]]; then
+        cache_source=$(create_temp_file)
+        : > "$cache_source"
+        cache_source_is_temp=true
+    fi
+
+    # Local spinner_pid for cleanup
+    local spinner_pid=""
+    local spinner_shown_file="${temp_file}.spinner_shown"
+    local previous_int_trap=""
+    previous_int_trap=$(trap -p INT || true)
+
+    restore_scan_int_trap() {
+        if [[ -n "$previous_int_trap" ]]; then
+            # eval: restore previous trap captured by $(trap -p INT)
+            eval "$previous_int_trap"
+        else
+            trap - INT
+        fi
+    }
+
+    # Trap to handle Ctrl+C during scan
+    # shellcheck disable=SC2329  # Function invoked indirectly via trap
+    trap_scan_cleanup() {
+        if [[ -n "$spinner_pid" ]]; then
+            kill -TERM "$spinner_pid" 2> /dev/null || true
+            wait "$spinner_pid" 2> /dev/null || true
+        fi
+        if [[ -f "$spinner_shown_file" ]]; then
+            printf "\r\033[K" >&2
+        fi
+        rm -f "$temp_file" "$scan_raw_file" "$merged_file" "$refresh_file" "$cache_snapshot_file" "$discovered_file" "$cached_rows_file" "$uncached_rows_file" "$scan_status_file" "${temp_file}.sorted" "$spinner_shown_file" 2> /dev/null || true
+        exit 130
+    }
+    trap trap_scan_cleanup INT
+
+    update_scan_status() {
+        local message="$1"
+        local completed="${2:-0}"
+        local total="${3:-0}"
+        printf "%s|%s|%s\n" "$message" "$completed" "$total" > "$scan_status_file"
+    }
+
+    stop_scan_spinner() {
+        if [[ -n "$spinner_pid" ]]; then
+            kill -TERM "$spinner_pid" 2> /dev/null || true
+            wait "$spinner_pid" 2> /dev/null || true
+            spinner_pid=""
+        fi
+        if [[ -f "$spinner_shown_file" ]]; then
+            printf "\r\033[K" >&2
+        fi
+        rm -f "$spinner_shown_file" "$scan_status_file" 2> /dev/null || true
+    }
+
+    # Phase 2: discover candidate apps.
+    _scan_discover_apps
+
+    # Phase 3: partition into warm-cache and cold rows.
+    local -a app_data_tuples=()
+    _scan_partition_cache
+
+    # Phase 4: bail out if discovery yielded nothing.
+    if [[ ${#app_data_tuples[@]} -eq 0 && ! -s "$scan_raw_file" ]]; then
+        rm -f "$temp_file" "$scan_raw_file" "$merged_file" "$refresh_file" "$cache_snapshot_file" "$discovered_file" "$cached_rows_file" "$uncached_rows_file" "$scan_status_file" "${temp_file}.sorted" "$spinner_shown_file" 2> /dev/null || true
+        [[ $cache_source_is_temp == true ]] && rm -f "$cache_source" 2> /dev/null || true
+        restore_scan_int_trap
+        printf "\r\033[K" >&2
+        echo "No applications found to uninstall." >&2
+        return 1
+    fi
+    # Phase 5: parallel metadata resolution for cold rows.
+    _scan_resolve_uncached
+
+    # Phase 6: bail out if Pass 2 produced nothing.
+    update_scan_status "Building uninstall index..." "0" "0"
+
+    if [[ ! -s "$scan_raw_file" ]]; then
+        stop_scan_spinner
+        echo "No applications found to uninstall" >&2
+        rm -f "$temp_file" "$scan_raw_file" "$merged_file" "$refresh_file" "$cache_snapshot_file" "$discovered_file" "$cached_rows_file" "$uncached_rows_file" "${temp_file}.sorted" "$spinner_shown_file" 2> /dev/null || true
+        [[ $cache_source_is_temp == true ]] && rm -f "$cache_source" 2> /dev/null || true
+        restore_scan_int_trap
+        return 1
+    fi
+
+    # Phase 7+8: merge cache, persist, sort, return path.
+    _scan_finalize_index
 }
 
 load_applications() {
