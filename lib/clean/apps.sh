@@ -801,6 +801,23 @@ clean_orphaned_system_services() {
 # A stub container contains only .com.apple.containermanagerd.metadata.plist
 # with no Data/ subdirectory — it holds no user data and is safe to remove.
 # Only targets a hardcoded allowlist of apps known to leave such stubs.
+_remove_verified_container_stub() {
+    local container_dir="$1"
+    local metadata_plist="$2"
+
+    [[ -d "$container_dir" ]] || return 1
+    [[ ! -L "$container_dir" ]] || return 1
+    [[ "$metadata_plist" == "$container_dir/.com.apple.containermanagerd.metadata.plist" ]] || return 1
+    [[ -f "$metadata_plist" ]] || return 1
+
+    if find "$container_dir" -mindepth 1 -maxdepth 1 ! -name ".com.apple.containermanagerd.metadata.plist" -print -quit 2> /dev/null | grep -q .; then
+        return 1
+    fi
+
+    command rm -f -- "$metadata_plist" || return 1
+    command rmdir -- "$container_dir"
+}
+
 clean_orphaned_container_stubs() {
     local containers_dir="$HOME/Library/Containers"
     [[ -d "$containers_dir" ]] || return 0
@@ -883,11 +900,9 @@ clean_orphaned_container_stubs() {
 
             if [[ "$DRY_RUN" != "true" ]]; then
                 # These directories have already passed the narrow stub-only
-                # checks above. Use direct removal so broad app-protection rules
-                # for the parent vendor bundle do not keep empty metadata stubs.
-                # safe_remove cannot be used here: it runs should_protect_path
-                # which intentionally vetos vendor-bundle paths we just verified.
-                if command rm -rf -- "$container_dir" > /dev/null 2>&1; then # SAFE: verified stub-only container
+                # checks above. Remove only the exact metadata file, then rmdir,
+                # so any new content that appears before deletion is preserved.
+                if _remove_verified_container_stub "$container_dir" "$metadata_plist" > /dev/null 2>&1; then
                     removed_count=$((removed_count + 1))
                     log_operation "${MOLE_CURRENT_COMMAND:-clean}" "REMOVED" "$container_dir" "stub-container"
                 else

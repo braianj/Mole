@@ -956,6 +956,64 @@ EOF
     [[ "$output" == *"Orphaned app container stubs"* ]]
 }
 
+@test "clean_orphaned_container_stubs preserves content that appears during removal" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/apps.sh"
+
+stub="$HOME/Library/Containers/com.macpaw.CleanMyMac-mas"
+mkdir -p "$stub"
+touch "$stub/.com.apple.containermanagerd.metadata.plist"
+
+fake_bin="$(mktemp -d "$HOME/fake-bin.XXXXXX")"
+cat > "$fake_bin/rm" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+target=""
+for arg in "$@"; do
+    target="$arg"
+done
+if [[ -n "$target" ]]; then
+    if [[ -d "$target" ]]; then
+        touch "$target/raced-content"
+    else
+        parent=$(dirname "$target")
+        touch "$parent/raced-content"
+    fi
+fi
+exec /bin/rm "$@"
+SH
+chmod +x "$fake_bin/rm"
+PATH="$fake_bin:$PATH"
+export PATH
+hash -r
+
+mdfind() { echo ""; return 0; }
+run_with_timeout() { shift; "$@"; }
+note_activity() { :; }
+debug_log() { :; }
+is_path_whitelisted() { return 1; }
+
+files_cleaned=0
+total_items=0
+total_size_cleaned=0
+
+clean_orphaned_container_stubs
+
+if [[ -f "$stub/raced-content" ]]; then
+    echo "PASS: race content preserved"
+else
+    echo "FAIL: race content was deleted"
+    exit 1
+fi
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PASS: race content preserved"* ]]
+    [[ "$output" == *"could not be removed"* ]]
+}
+
 @test "clean_orphaned_container_stubs preserves container when app is installed" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=false bash --noprofile --norc <<'EOF'
 set -euo pipefail
