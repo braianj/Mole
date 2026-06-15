@@ -196,6 +196,10 @@ $script:ProtectedPaths = @(
     "$env:WINDIR"
 )
 
+$script:ExactProtectedPaths = @(
+    "$env:USERPROFILE" # Protect the user profile root without blocking targeted cache cleanup below it.
+)
+
 # ============================================================================
 # System Utilities
 # ============================================================================
@@ -290,11 +294,47 @@ function Test-ProtectedPath {
         Check if a path is protected and should never be modified
     #>
     param([string]$Path)
-    
-    $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
-    
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $true
+    }
+
+    try {
+        $normalizedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    }
+    catch {
+        return $true
+    }
+
+    foreach ($protected in $script:ExactProtectedPaths) {
+        if ([string]::IsNullOrWhiteSpace($protected)) {
+            continue
+        }
+
+        try {
+            $normalizedProtected = [System.IO.Path]::GetFullPath($protected).TrimEnd('\')
+        }
+        catch {
+            continue
+        }
+
+        if ($normalizedPath -eq $normalizedProtected) {
+            return $true
+        }
+    }
+
     foreach ($protected in $script:ProtectedPaths) {
-        $normalizedProtected = [System.IO.Path]::GetFullPath($protected).TrimEnd('\')
+        if ([string]::IsNullOrWhiteSpace($protected)) {
+            continue
+        }
+
+        try {
+            $normalizedProtected = [System.IO.Path]::GetFullPath($protected).TrimEnd('\')
+        }
+        catch {
+            continue
+        }
+
         if ($normalizedPath -eq $normalizedProtected -or 
             $normalizedPath.StartsWith("$normalizedProtected\", [StringComparison]::OrdinalIgnoreCase)) {
             return $true
@@ -505,5 +545,5 @@ function Clear-TempFiles {
 # ============================================================================
 # Exports (functions and variables are available via dot-sourcing)
 # ============================================================================
-# Variables: Colors, Icons, Config, ProtectedPaths, DefaultWhitelistPatterns
+# Variables: Colors, Icons, Config, ProtectedPaths, ExactProtectedPaths, DefaultWhitelistPatterns
 # Functions: Test-IsAdmin, Get-FreeSpace, Get-WindowsVersion, etc.

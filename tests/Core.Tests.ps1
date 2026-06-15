@@ -182,6 +182,14 @@ Describe "File Operations Module" {
             Test-ProtectedPath -Path "C:\Windows\System32" | Should -Be $true
         }
 
+        It "Should protect the user profile root exactly" {
+            $userProfile = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+            $userProfileChild = Join-Path $userProfile "AppData\Local\Temp"
+
+            Test-ProtectedPath -Path $userProfile | Should -Be $true
+            Test-ProtectedPath -Path $userProfileChild | Should -Be $false
+        }
+
         It "Should protect Windows Defender paths" {
             Test-ProtectedPath -Path "C:\Program Files\Windows Defender" | Should -Be $true
             Test-ProtectedPath -Path "C:\ProgramData\Microsoft\Windows Defender" | Should -Be $true
@@ -196,6 +204,10 @@ Describe "File Operations Module" {
         It "Should return false for protected paths" {
             Test-SafePath -Path "C:\Windows" | Should -Be $false
             Test-SafePath -Path "C:\Windows\System32" | Should -Be $false
+        }
+
+        It "Should return false for the user profile root" {
+            Test-SafePath -Path $env:USERPROFILE | Should -Be $false
         }
 
         It "Should return true for safe paths" {
@@ -239,6 +251,74 @@ Describe "File Operations Module" {
         It "Should not remove protected paths" {
             $result = Remove-SafeItem -Path "C:\Windows\System32"
             $result | Should -Be $false
+        }
+
+        It "Should remove empty directories successfully" {
+            $emptyDir = Join-Path $script:TestDir "empty_remove_test"
+            New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+
+            $result = Remove-SafeItem -Path $emptyDir -Description "Empty directory" -Recurse
+
+            $result | Should -Be $true
+            Test-Path $emptyDir | Should -Be $false
+        }
+
+        It "Should not partially remove a directory tree when a protected child is present" {
+            $treeRoot = Join-Path $script:TestDir "protected_child_tree"
+            $safeFile = Join-Path $treeRoot "safe.txt"
+            $protectedDir = Join-Path $treeRoot "protected"
+            $protectedFile = Join-Path $protectedDir "secret.txt"
+            $originalProtectedPaths = $script:ProtectedPaths
+
+            New-Item -ItemType Directory -Path $protectedDir -Force | Out-Null
+            "safe" | Set-Content -Path $safeFile
+            "secret" | Set-Content -Path $protectedFile
+
+            try {
+                $script:ProtectedPaths = @($script:ProtectedPaths + $protectedDir)
+
+                $result = Remove-SafeItem -Path $treeRoot -Description "Protected child tree" -Recurse
+
+                $result | Should -Be $false
+                Test-Path $safeFile | Should -Be $true
+                Test-Path $protectedFile | Should -Be $true
+            }
+            finally {
+                $script:ProtectedPaths = $originalProtectedPaths
+                if (Test-Path $treeRoot) {
+                    Remove-Item -Path $treeRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        It "Should reject dry-run previews when a directory tree contains a protected child" {
+            $treeRoot = Join-Path $script:TestDir "protected_child_dry_run_tree"
+            $safeFile = Join-Path $treeRoot "safe.txt"
+            $protectedDir = Join-Path $treeRoot "protected"
+            $protectedFile = Join-Path $protectedDir "secret.txt"
+            $originalProtectedPaths = $script:ProtectedPaths
+
+            New-Item -ItemType Directory -Path $protectedDir -Force | Out-Null
+            "safe" | Set-Content -Path $safeFile
+            "secret" | Set-Content -Path $protectedFile
+
+            try {
+                $script:ProtectedPaths = @($script:ProtectedPaths + $protectedDir)
+                Set-DryRunMode -Enabled $true
+
+                $result = Remove-SafeItem -Path $treeRoot -Description "Protected child dry-run tree" -Recurse
+
+                $result | Should -Be $false
+                Test-Path $safeFile | Should -Be $true
+                Test-Path $protectedFile | Should -Be $true
+            }
+            finally {
+                Set-DryRunMode -Enabled $false
+                $script:ProtectedPaths = $originalProtectedPaths
+                if (Test-Path $treeRoot) {
+                    Remove-Item -Path $treeRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
 }

@@ -224,6 +224,14 @@ Describe "Installer Script" {
             $source | Should -Match "version\.ps1"
             $source | Should -Match 'Get-MoleVersionString -RootDir \$script:SourceDir'
         }
+
+        It "Should reject protected root install and uninstall paths" {
+            $source = Get-Content $script:InstallScript -Raw
+            $source | Should -Match "function Test-ProtectedInstallRoot"
+            $source | Should -Match "Refusing to use protected install directory"
+            $source | Should -Match "Refusing to remove protected install directory"
+            $source | Should -Match '\$env:USERPROFILE'
+        }
     }
 
     Context "Optional TUI Tools" {

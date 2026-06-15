@@ -113,6 +113,93 @@ function Get-PathSizeKB {
 # Safe Removal Functions
 # ============================================================================
 
+function Get-SafeDirectoryTreeItems {
+    <#
+    .SYNOPSIS
+        Enumerate and validate every child before recursive directory removal.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    try {
+        $items = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop)
+    }
+    catch {
+        Write-Debug "Could not enumerate directory before removal: $Path - $_"
+        return @{
+            Success = $false
+            Items   = @()
+        }
+    }
+
+    foreach ($item in $items) {
+        if (-not (Test-SafePath -Path $item.FullName)) {
+            Write-Debug "Protected/whitelisted child rejected before recursive removal: $($item.FullName)"
+            return @{
+                Success = $false
+                Items   = @()
+            }
+        }
+    }
+
+    return @{
+        Success = $true
+        Items   = $items
+    }
+}
+
+function Remove-SafeDirectoryTree {
+    <#
+    .SYNOPSIS
+        Remove a directory only after all descendants pass safety checks.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [hashtable]$ValidatedTree = $null
+    )
+
+    $tree = if ($null -ne $ValidatedTree) {
+        $ValidatedTree
+    }
+    else {
+        Get-SafeDirectoryTreeItems -Path $Path
+    }
+
+    if (-not $tree.Success) {
+        return $false
+    }
+
+    $orderedItems = @()
+    if ($null -ne $tree.Items) {
+        $orderedItems = @($tree.Items | Sort-Object { $_.FullName.Length } -Descending)
+    }
+
+    foreach ($item in $orderedItems) {
+        try {
+            Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+            Write-Debug "Removed child item: $($item.FullName)"
+        }
+        catch {
+            Write-Debug "Failed to remove child item: $($item.FullName) - $_"
+            return $false
+        }
+    }
+
+    try {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        Write-Debug "Removed directory root: $Path"
+        return $true
+    }
+    catch {
+        Write-Debug "Failed to remove directory root: $Path - $_"
+        return $false
+    }
+}
+
 function Remove-SafeItem {
     <#
     .SYNOPSIS
@@ -146,7 +233,16 @@ function Remove-SafeItem {
         Write-Debug "Path does not exist: $Path"
         return $false
     }
-    
+
+    $isDirectory = Test-Path $Path -PathType Container
+    $validatedTree = $null
+    if ($isDirectory) {
+        $validatedTree = Get-SafeDirectoryTreeItems -Path $Path
+        if (-not $validatedTree.Success) {
+            return $false
+        }
+    }
+
     # Get size before removal
     $size = Get-PathSize -Path $Path
     $sizeKB = [Math]::Ceiling($size / 1024)
@@ -162,13 +258,13 @@ function Remove-SafeItem {
     
     # Perform removal
     try {
-        $isDirectory = Test-Path $Path -PathType Container
-        
         if ($isDirectory) {
-            Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
+            if (-not (Remove-SafeDirectoryTree -Path $Path -ValidatedTree $validatedTree)) {
+                return $false
+            }
         }
         else {
-            Remove-Item -Path $Path -Force -ErrorAction Stop
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
         }
         
         # Update statistics
@@ -213,6 +309,16 @@ function Remove-SafeItems {
         if (-not (Test-Path $path)) {
             continue
         }
+
+        $isDirectory = Test-Path $path -PathType Container
+        $validatedTree = $null
+        if ($isDirectory) {
+            $validatedTree = Get-SafeDirectoryTreeItems -Path $path
+            if (-not $validatedTree.Success) {
+                $failedCount++
+                continue
+            }
+        }
         
         $size = Get-PathSize -Path $path
         
@@ -223,12 +329,14 @@ function Remove-SafeItems {
         }
         
         try {
-            $isDirectory = Test-Path $path -PathType Container
             if ($isDirectory) {
-                Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
+                if (-not (Remove-SafeDirectoryTree -Path $path -ValidatedTree $validatedTree)) {
+                    $failedCount++
+                    continue
+                }
             }
             else {
-                Remove-Item -Path $path -Force -ErrorAction Stop
+                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
             }
             $totalSize += $size
             $removedCount++

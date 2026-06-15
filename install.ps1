@@ -87,6 +87,51 @@ function Test-SamePath {
     return (Get-NormalizedPath -Path $PathA) -eq (Get-NormalizedPath -Path $PathB)
 }
 
+function Test-ProtectedInstallRoot {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $true
+    }
+
+    try {
+        $normalizedPath = Get-NormalizedPath -Path $Path
+    }
+    catch {
+        return $true
+    }
+
+    $protectedRoots = @(
+        $env:USERPROFILE
+        [Environment]::GetFolderPath("UserProfile")
+        $env:LOCALAPPDATA
+        $env:APPDATA
+        $env:ProgramFiles
+        ${env:ProgramFiles(x86)}
+        $env:ProgramData
+        "$env:SystemDrive\"
+        "$env:WINDIR"
+        "$env:SYSTEMROOT"
+    )
+
+    foreach ($root in $protectedRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+
+        try {
+            if ($normalizedPath -eq (Get-NormalizedPath -Path $root)) {
+                return $true
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    return $false
+}
+
 function Show-Banner {
     $c = $script:Colors
     Write-Host ""
@@ -281,6 +326,11 @@ function Install-Mole {
     Write-Info "Installing Mole v$script:VERSION..."
     Write-Host ""
 
+    if (Test-ProtectedInstallRoot -Path $InstallDir) {
+        Write-MoleError "Refusing to use protected install directory: $InstallDir"
+        return $false
+    }
+
     $inPlaceInstall = Test-SamePath -PathA $script:SourceDir -PathB $InstallDir
 
     # Check if already installed
@@ -442,6 +492,11 @@ function Uninstall-Mole {
         return $true
     }
 
+    if (Test-ProtectedInstallRoot -Path $installPath) {
+        Write-MoleError "Refusing to remove protected install directory: $installPath"
+        return $false
+    }
+
     # Remove from PATH
     Remove-FromUserPath -Directory $installPath
 
@@ -450,7 +505,7 @@ function Uninstall-Mole {
 
     # Remove installation directory
     try {
-        Remove-Item -Path $installPath -Recurse -Force
+        Remove-Item -LiteralPath $installPath -Recurse -Force
         Write-Success "Removed directory: $installPath"
     }
     catch {
@@ -465,7 +520,7 @@ function Uninstall-Mole {
         $response = Read-Host "  Remove config files? (y/N)"
         if ($response -eq "y" -or $response -eq "Y") {
             try {
-                Remove-Item -Path $configDir -Recurse -Force
+                Remove-Item -LiteralPath $configDir -Recurse -Force
                 Write-Success "Removed config: $configDir"
             }
             catch {
