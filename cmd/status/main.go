@@ -26,6 +26,12 @@ var (
 	procCPUThreshold = flag.Float64("proc-cpu-threshold", 100, "alert when a process stays above this CPU percent")
 	procCPUWindow    = flag.Duration("proc-cpu-window", 5*time.Minute, "continuous duration a process must exceed the CPU threshold")
 	procCPUAlerts    = flag.Bool("proc-cpu-alerts", true, "enable persistent high-CPU process alerts")
+
+	// Watch mode (consumed by MoleUI): stream NDJSON (one snapshot per line)
+	// from a single warm collector, optionally over a unix socket.
+	watchMode     = flag.Bool("watch", false, "stream metrics continuously as newline-delimited JSON instead of the one-shot TUI/JSON")
+	watchListen   = flag.String("listen", "", "with --watch, serve the NDJSON stream over this unix socket path instead of stdout")
+	watchInterval = flag.String("interval", "", "with --watch, collection interval (e.g. 1s, 2s); defaults to 1s")
 )
 
 func shouldUseJSONOutput(forceJSON bool, stdout *os.File) bool {
@@ -337,6 +343,20 @@ func main() {
 	if err := validateFlags(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(2)
+	}
+
+	if *watchMode {
+		interval := refreshInterval
+		if *watchInterval != "" {
+			d, err := time.ParseDuration(*watchInterval)
+			if err != nil || d <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid --interval %q (want e.g. 1s, 2s): %v\n", *watchInterval, err)
+				os.Exit(2)
+			}
+			interval = d
+		}
+		runWatchMode(interval, *watchListen)
+		return
 	}
 
 	if shouldUseJSONOutput(*jsonOutput, os.Stdout) {
