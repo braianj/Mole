@@ -702,3 +702,47 @@ assert mem['total'] > 0, 'memory total should be positive'
 	output=$("$STATUS_BIN" 2>/dev/null)
 	echo "$output" | python3 -c "import sys, json; json.load(sys.stdin)"
 }
+
+@test "mo status --watch streams newline-delimited JSON" {
+	if [[ ! -x "${STATUS_BIN:-}" ]]; then
+		skip "status binary not available (go not installed?)"
+	fi
+
+	run python3 - "$STATUS_BIN" <<'PY'
+import json
+import subprocess
+import sys
+
+status_bin = sys.argv[1]
+proc = subprocess.Popen(
+    [status_bin, "--watch", "--interval", "200ms"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+)
+lines = []
+try:
+    for _ in range(3):
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError("missing watch output")
+        snapshot = json.loads(line)
+        for key in ("collected_at", "cpu", "memory", "disk_io", "network", "health_score"):
+            if key not in snapshot:
+                raise RuntimeError(f"missing key: {key}")
+        lines.append(snapshot)
+finally:
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+
+if proc.stderr.read():
+    raise RuntimeError("watch wrote to stderr")
+print(f"watch_lines={len(lines)}")
+PY
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"watch_lines=3"* ]]
+}

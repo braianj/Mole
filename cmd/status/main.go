@@ -27,10 +27,8 @@ var (
 	procCPUWindow    = flag.Duration("proc-cpu-window", 5*time.Minute, "continuous duration a process must exceed the CPU threshold")
 	procCPUAlerts    = flag.Bool("proc-cpu-alerts", true, "enable persistent high-CPU process alerts")
 
-	// Watch mode (consumed by MoleUI): stream NDJSON (one snapshot per line)
-	// from a single warm collector, optionally over a unix socket.
+	// Watch mode: stream NDJSON (one snapshot per line) from a single warm collector.
 	watchMode     = flag.Bool("watch", false, "stream metrics continuously as newline-delimited JSON instead of the one-shot TUI/JSON")
-	watchListen   = flag.String("listen", "", "with --watch, serve the NDJSON stream over this unix socket path instead of stdout")
 	watchInterval = flag.String("interval", "", "with --watch, collection interval (e.g. 1s, 2s); defaults to 1s")
 )
 
@@ -195,11 +193,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.metrics = msg.data
 		m.lastUpdated = msg.data.CollectedAt
-		if msg.mode == collectionFull && msg.err == nil {
-			m.lastFullAt = msg.data.CollectedAt
-		}
-		if (msg.mode == collectionProcess || msg.mode == collectionFull) && msg.err == nil {
-			m.lastProcessAt = msg.data.CollectedAt
+		if msg.err == nil {
+			recordCollectionFreshness(msg.mode, msg.data.CollectedAt, &m.lastFullAt, &m.lastProcessAt)
 		}
 		m.collecting = false
 		// Mark ready after first successful data collection.
@@ -267,16 +262,29 @@ func (m model) View() string {
 }
 
 func (m model) nextCollectionMode(now time.Time) collectionMode {
-	if !m.ready {
+	return nextCollectionMode(m.ready, m.lastFullAt, m.lastProcessAt, now)
+}
+
+func nextCollectionMode(ready bool, lastFullAt, lastProcessAt, now time.Time) collectionMode {
+	if !ready {
 		return collectionFast
 	}
-	if m.lastFullAt.IsZero() || now.Sub(m.lastFullAt) >= slowRefreshInterval {
+	if lastFullAt.IsZero() || now.Sub(lastFullAt) >= slowRefreshInterval {
 		return collectionFull
 	}
-	if m.lastProcessAt.IsZero() || now.Sub(m.lastProcessAt) >= processWatchInterval {
+	if lastProcessAt.IsZero() || now.Sub(lastProcessAt) >= processWatchInterval {
 		return collectionProcess
 	}
 	return collectionFast
+}
+
+func recordCollectionFreshness(mode collectionMode, collectedAt time.Time, lastFullAt, lastProcessAt *time.Time) {
+	if mode == collectionFull {
+		*lastFullAt = collectedAt
+	}
+	if mode == collectionProcess || mode == collectionFull {
+		*lastProcessAt = collectedAt
+	}
 }
 
 func (m model) collectCmd(mode collectionMode) tea.Cmd {
@@ -338,6 +346,21 @@ func runTUIMode() {
 	}
 }
 
+func parseWatchInterval(raw string) (time.Duration, error) {
+	if raw == "" {
+		return refreshInterval, nil
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --interval %q (want e.g. 1s, 2s): %w", raw, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid --interval %q (must be > 0)", raw)
+	}
+	return d, nil
+}
+
 func main() {
 	flag.Parse()
 	if err := validateFlags(); err != nil {
@@ -346,16 +369,12 @@ func main() {
 	}
 
 	if *watchMode {
-		interval := refreshInterval
-		if *watchInterval != "" {
-			d, err := time.ParseDuration(*watchInterval)
-			if err != nil || d <= 0 {
-				fmt.Fprintf(os.Stderr, "invalid --interval %q (want e.g. 1s, 2s): %v\n", *watchInterval, err)
-				os.Exit(2)
-			}
-			interval = d
+		interval, err := parseWatchInterval(*watchInterval)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(2)
 		}
-		runWatchMode(interval, *watchListen)
+		runWatchMode(interval)
 		return
 	}
 
